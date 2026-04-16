@@ -1,0 +1,19 @@
+# Exclude everything by default, then allow only what the Dockerfile needs.
+**
+
+!python/opendataloader-pdf/pyproject.toml
+!python/opendataloader-pdf/README.md
+!python/opendataloader-pdf/hatch_build.py
+!python/opendataloader-pdf/src/**
+
+# Never ship build artefacts, caches, tests, or local venvs.
+**/__pycache__
+**/*.pyc
+**/*.pyo
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+**/.venv
+**/dist
+**/build
+**/*.egg-info
