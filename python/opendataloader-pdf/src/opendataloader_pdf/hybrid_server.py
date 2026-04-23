@@ -75,7 +75,8 @@ logger = logging.getLogger(__name__)
 
 # Configuration
 DEFAULT_HOST = "0.0.0.0"
-DEFAULT_PORT = 5002
+# Cloud Run (and other PaaS hosts) inject the listen port via $PORT.
+DEFAULT_PORT = int(os.environ.get("PORT", "5002"))
 MAX_FILE_SIZE = 0  # No file size limit by default (0 = unlimited)
 UPLOAD_CHUNK_SIZE = 1024 * 1024  # 1MB chunks for streaming upload
 
@@ -332,6 +333,7 @@ def create_app(
     picture_description_prompt: str | None = None,
     max_file_size: int = MAX_FILE_SIZE,
     device: str = "auto",
+    gemini_enricher: Optional["GeminiEnricher"] = None,
 ):
     """Create and configure the FastAPI application.
 
@@ -343,6 +345,8 @@ def create_app(
         picture_description_prompt: Custom prompt for picture description.
         max_file_size: Maximum file size in bytes. 0 means no limit (default).
         device: Accelerator device for model inference ("auto", "cpu", "cuda", "mps", "xpu").
+        gemini_enricher: Optional GeminiEnricher that, if provided, runs after
+            Docling conversion to add Gemini-generated picture descriptions.
     """
     from fastapi import FastAPI, File, Form, UploadFile
     from fastapi.responses import JSONResponse
@@ -464,6 +468,14 @@ def create_app(
 
             # Export to JSON (DoclingDocument format)
             json_content = result.document.export_to_dict()
+
+            if gemini_enricher is not None:
+                try:
+                    json_content = await asyncio.to_thread(
+                        gemini_enricher.enrich_document, json_content
+                    )
+                except Exception as exc:
+                    logger.warning("Gemini enrichment failed; continuing without it: %s", exc)
 
             # Sanitize lone surrogates and null chars from OCR output to prevent
             # UnicodeEncodeError in Starlette's JSONResponse.render()
@@ -678,6 +690,51 @@ def main():
         choices=["auto", "cpu", "cuda", "mps", "xpu"],
         help="Accelerator device for model inference: auto (default), cpu, cuda, mps (Apple Silicon), xpu (Intel GPU).",
     )
+    parser.add_argument(
+        "--use-gemini",
+        action="store_true",
+        default=os.environ.get("OPENDATALOADER_USE_GEMINI", "").lower() in {"1", "true", "yes"},
+        help="Enable Gemini-based picture description (replaces/augments SmolVLM). "
+             "Requires GEMINI_API_KEY or Vertex AI credentials.",
+    )
+    parser.add_argument(
+        "--gemini-api-key",
+        type=str,
+        default=None,
+        help="Gemini Developer API key. Falls back to $GEMINI_API_KEY. "
+             "Leave unset when using Vertex AI.",
+    )
+    parser.add_argument(
+        "--gemini-model",
+        type=str,
+        default=os.environ.get("GEMINI_MODEL", "gemini-3.1-flash"),
+        help="Gemini model id (default: gemini-3.1-flash).",
+    )
+    parser.add_argument(
+        "--gemini-prompt",
+        type=str,
+        default=None,
+        help="Custom prompt for Gemini picture descriptions.",
+    )
+    parser.add_argument(
+        "--gemini-vertexai",
+        action="store_true",
+        default=os.environ.get("GOOGLE_GENAI_USE_VERTEXAI", "").lower() in {"1", "true", "yes"},
+        help="Route Gemini calls through Vertex AI. "
+             "Requires GOOGLE_CLOUD_PROJECT and Application Default Credentials.",
+    )
+    parser.add_argument(
+        "--gemini-project",
+        type=str,
+        default=None,
+        help="GCP project id for Vertex AI (default: $GOOGLE_CLOUD_PROJECT).",
+    )
+    parser.add_argument(
+        "--gemini-location",
+        type=str,
+        default=None,
+        help="GCP location for Vertex AI (default: $GOOGLE_CLOUD_LOCATION or us-central1).",
+    )
     args = parser.parse_args()
 
     # Parse ocr_lang
@@ -722,6 +779,24 @@ def main():
     if enrichments:
         logger.info(f"Enrichments enabled: {', '.join(enrichments)}")
 
+    gemini_enricher = None
+    if args.use_gemini:
+        from .gemini_enricher import GeminiConfig, GeminiEnricher
+
+        gemini_kwargs: dict[str, Any] = {
+            "api_key": args.gemini_api_key,
+            "model": args.gemini_model,
+            "use_vertexai": args.gemini_vertexai,
+            "project": args.gemini_project,
+            "location": args.gemini_location,
+        }
+        if args.gemini_prompt:
+            gemini_kwargs["prompt"] = args.gemini_prompt
+        config = GeminiConfig.from_env(**gemini_kwargs)
+        gemini_enricher = GeminiEnricher(config)
+        backend = "Vertex AI" if config.use_vertexai else "Gemini Developer API"
+        logger.info("Gemini enrichment enabled: model=%s backend=%s", config.model, backend)
+
     app = create_app(
         force_ocr=args.force_ocr,
         ocr_lang=ocr_lang,
@@ -730,6 +805,7 @@ def main():
         picture_description_prompt=args.picture_description_prompt,
         max_file_size=max_file_size_bytes,
         device=args.device,
+        gemini_enricher=gemini_enricher,
     )
     uvicorn.run(
         app,

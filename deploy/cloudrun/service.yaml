@@ -1,0 +1,68 @@
+# Declarative Cloud Run service definition.
+# Apply with:
+#   gcloud run services replace deploy/cloudrun/service.yaml --region=us-central1
+#
+# Placeholders to fill before applying:
+#   PROJECT_ID, REGION, IMAGE_TAG, SERVICE_ACCOUNT_EMAIL
+#
+# Secret Manager: create `gemini-api-key` and grant the runtime service
+# account roles/secretmanager.secretAccessor.
+
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: opendataloader-hybrid
+  annotations:
+    run.googleapis.com/launch-stage: GA
+    run.googleapis.com/ingress: all
+spec:
+  template:
+    metadata:
+      annotations:
+        # Cold starts can exceed 30s while models load; keep startup slack.
+        run.googleapis.com/startup-cpu-boost: "true"
+        # Let the container drain long-running conversions.
+        run.googleapis.com/execution-environment: gen2
+        autoscaling.knative.dev/minScale: "0"
+        autoscaling.knative.dev/maxScale: "10"
+    spec:
+      serviceAccountName: SERVICE_ACCOUNT_EMAIL
+      containerConcurrency: 4
+      timeoutSeconds: 900
+      containers:
+        - image: REGION-docker.pkg.dev/PROJECT_ID/opendataloader/opendataloader-hybrid:IMAGE_TAG
+          ports:
+            - name: http1
+              containerPort: 8080
+          resources:
+            limits:
+              cpu: "4"
+              memory: 8Gi
+          startupProbe:
+            httpGet:
+              path: /health
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /health
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          env:
+            - name: OPENDATALOADER_USE_GEMINI
+              value: "true"
+            - name: GEMINI_MODEL
+              value: gemini-3.1-flash
+            - name: EXTRA_ARGS
+              value: "--use-gemini"
+            # Gemini Developer API mode. Swap for Vertex AI by removing the
+            # secret ref below and setting GOOGLE_GENAI_USE_VERTEXAI=true plus
+            # GOOGLE_CLOUD_PROJECT / GOOGLE_CLOUD_LOCATION.
+            - name: GEMINI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: gemini-api-key
+                  key: latest

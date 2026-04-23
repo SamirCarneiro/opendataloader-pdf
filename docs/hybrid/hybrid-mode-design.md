@@ -48,10 +48,24 @@ opendataloader-pdf --hybrid hancom input.pdf
 | Backend | Status | Description |
 |---------|--------|-------------|
 | `off` | ✅ Default | Java-only, no external calls |
-| `docling-fast` | ✅ Available | docling-serve (local) |
+| `docling-fast` | ✅ Available | docling-serve (local or Cloud Run) |
+| `docling-fast` + Gemini | ✅ Available | Docling + Gemini 3.1 Flash for picture descriptions, packaged for Cloud Run (`deploy/cloudrun/`) |
 | `hancom` | 📋 Future (Priority) | Hancom Document AI |
 | `azure` | 📋 Future | Azure Document Intelligence |
 | `google` | 📋 Future | Google Document AI |
+
+### Gemini-enriched docling-fast backend
+
+The `docling-fast` Python server supports an optional Gemini enrichment pass
+that replaces SmolVLM for picture descriptions. Enable with `--use-gemini`
+(or `OPENDATALOADER_USE_GEMINI=true`) and provide credentials via:
+
+- `GEMINI_API_KEY` — Gemini Developer API, or
+- `GOOGLE_GENAI_USE_VERTEXAI=true` + `GOOGLE_CLOUD_PROJECT` — Vertex AI with
+  Application Default Credentials (the native path on Cloud Run).
+
+Deployment manifests for Google Cloud Run live in
+[`deploy/cloudrun/`](../../deploy/cloudrun/README.md).
 
 ---
 

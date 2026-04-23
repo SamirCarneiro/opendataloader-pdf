@@ -21,6 +21,16 @@ hybrid = [
     "uvicorn>=0.44.0",
     "python-multipart>=0.0.26",
 ]
+gemini = [
+    "google-genai>=0.3.0",
+]
+cloudrun = [
+    "docling[easyocr]>=2.0.0",
+    "fastapi>=0.100.0",
+    "uvicorn[standard]>=0.20.0",
+    "python-multipart>=0.0.22",
+    "google-genai>=0.3.0",
+]
 
 [project.scripts]
 opendataloader-pdf = "opendataloader_pdf.wrapper:main"

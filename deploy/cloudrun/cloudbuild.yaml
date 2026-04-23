@@ -1,0 +1,69 @@
+# Cloud Build pipeline: build the hybrid-server image, push to Artifact
+# Registry, and deploy a new Cloud Run revision.
+#
+# Trigger manually:
+#   gcloud builds submit --config=deploy/cloudrun/cloudbuild.yaml \
+#     --substitutions=_REGION=us-central1,_REPOSITORY=opendataloader,_SERVICE=opendataloader-hybrid
+#
+# Or attach to a GitHub push trigger via `gcloud builds triggers create github`.
+
+substitutions:
+  _REGION: us-central1
+  _REPOSITORY: opendataloader
+  _SERVICE: opendataloader-hybrid
+  _GEMINI_MODEL: gemini-3.1-flash
+  # Comma-separated args. Must stay non-empty; use a harmless flag if you
+  # don't want extras. `--enrich-formula` is already set in the Dockerfile CMD.
+  _EXTRA_ARGS: "--use-gemini"
+  # Populated via a Secret Manager reference in the deploy step.
+  _GEMINI_SECRET: gemini-api-key
+
+images:
+  - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/${_SERVICE}:${SHORT_SHA}
+  - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/${_SERVICE}:latest
+
+options:
+  machineType: E2_HIGHCPU_8
+  logging: CLOUD_LOGGING_ONLY
+
+steps:
+  - id: build
+    name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - --file=deploy/cloudrun/Dockerfile
+      - --tag=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/${_SERVICE}:${SHORT_SHA}
+      - --tag=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/${_SERVICE}:latest
+      - --cache-from=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/${_SERVICE}:latest
+      - .
+
+  - id: push
+    name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - --all-tags
+      - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/${_SERVICE}
+
+  - id: deploy
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - ${_SERVICE}
+      - --image=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/${_SERVICE}:${SHORT_SHA}
+      - --region=${_REGION}
+      - --platform=managed
+      - --cpu=4
+      - --memory=8Gi
+      - --concurrency=4
+      - --timeout=900
+      - --max-instances=10
+      - --min-instances=0
+      - --port=8080
+      - --allow-unauthenticated
+      - --set-env-vars=OPENDATALOADER_USE_GEMINI=true,GEMINI_MODEL=${_GEMINI_MODEL},EXTRA_ARGS=${_EXTRA_ARGS}
+      # Bind the Gemini API key from Secret Manager. When you'd rather use
+      # Vertex AI + Workload Identity, drop --set-secrets and add
+      #   --set-env-vars=GOOGLE_GENAI_USE_VERTEXAI=true,GOOGLE_CLOUD_PROJECT=${PROJECT_ID}
+      - --set-secrets=GEMINI_API_KEY=${_GEMINI_SECRET}:latest
