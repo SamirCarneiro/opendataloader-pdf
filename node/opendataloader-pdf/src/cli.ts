@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { Command, CommanderError } from 'commander';
-import { convert } from './index.js';
+import { _runForCli } from './index.js';
 import { CliOptions, buildConvertOptions } from './convert-options.generated.js';
 import { registerCliOptions } from './cli-options.generated.js';
 
@@ -56,17 +56,22 @@ async function main(): Promise<number> {
   const convertOptions = buildConvertOptions(cliOptions);
 
   try {
-    const output = await convert(inputPaths, convertOptions);
-    if (output && !convertOptions.quiet) {
-      process.stdout.write(output);
-      if (!output.endsWith('\n')) {
-        process.stdout.write('\n');
-      }
-    }
+    // _runForCli streams stdout/stderr to the parent process as they arrive;
+    // we deliberately do not re-print anything here. (Issue #398.)
+    await _runForCli(inputPaths, convertOptions);
     return 0;
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    console.error(message);
+    // Subprocess-exit errors are already on the user's terminal via the live
+    // stderr stream — re-printing would duplicate output and risk leaking
+    // anything sensitive Java logged (e.g. a --password value echoed by an
+    // underlying library). Wrapper-side failures (JAR not found, java not in
+    // PATH, bad input path) still need to be surfaced.
+    const isJavaExit =
+      err instanceof Error && (err as Error & { isJavaExit?: boolean }).isJavaExit === true;
+    if (!isJavaExit) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(message);
+    }
     return 1;
   }
 }

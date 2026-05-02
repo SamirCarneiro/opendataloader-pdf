@@ -70,6 +70,48 @@ public class DocumentProcessor {
     private static final Logger LOGGER = Logger.getLogger(DocumentProcessor.class.getCanonicalName());
 
     /**
+     * Releases PDF resources to prevent file locks and memory leaks.
+     * - Closes PDDocument to free OS file handles (required for file deletion)
+     * - Clears static containers to remove lingering references
+     * Should always be called in a finally block.
+     */
+    private static void closePdfResources() {
+        clearCleanupStep("PDDocument", () -> {
+            PDDocument document = StaticResources.getDocument();
+            if (document != null) {
+                document.close();
+            }
+        });
+        clearCleanupStep("ContrastRatioConsumer", StaticLayoutContainers::closeContrastRatioConsumer);
+
+        clearCleanupStep("StaticResources", StaticResources::clear);
+        clearCleanupStep("StaticContainers", () -> StaticContainers.updateContainers(null));
+        clearCleanupStep(
+            "GFStaticContainers",
+            org.verapdf.gf.model.impl.containers.StaticContainers::clearAllContainers
+        );
+        clearCleanupStep("StaticLayoutContainers", StaticLayoutContainers::clearContainers);
+        clearCleanupStep("StaticStorages", StaticStorages::clearAllContainers);
+        clearCleanupStep("StaticCoreContainers", StaticCoreContainers::clearAllContainers);
+        clearCleanupStep("StaticXmpCoreContainers", StaticXmpCoreContainers::clearAllContainers);
+    }
+
+    /**
+     * Executes a cleanup step safely without interrupting subsequent steps.
+     *
+     * Each cleanup action is isolated so that a failure in one step
+     * does not prevent the remaining cleanup operations from running.
+     * Errors are logged for debugging purposes.
+     */
+    private static void clearCleanupStep(String name, Runnable cleanup) {
+        try {
+            cleanup.run();
+        } catch (Exception e) {
+            LOGGER.log(Level.WARNING, "Error clearing " + name, e);
+        }
+    }
+
+    /**
      * Processes a PDF file and generates the configured outputs.
      *
      * @param inputPdfName the path to the input PDF file
@@ -90,15 +132,22 @@ public class DocumentProcessor {
      * @throws IOException if unable to process the file
      */
     public static ProcessingResult processFileWithResult(String inputPdfName, Config config) throws IOException {
-        // Phase 1: Extract
-        ExtractionResult extraction = extractContents(inputPdfName, config);
+        try {
+            // Phase 1: Extract
+            ExtractionResult extraction = extractContents(inputPdfName, config);
 
-        // Phase 2: Output (JSON/MD/HTML/PDF/Text)
-        long t0 = System.nanoTime();
-        generateOutputs(inputPdfName, extraction.getContents(), config, extraction.getElementMetadata());
-        long outputNs = System.nanoTime() - t0;
+            // Phase 2: Output (JSON/MD/HTML/PDF/Text)
+            long t0 = System.nanoTime();
+            generateOutputs(inputPdfName, extraction.getContents(), config, extraction.getElementMetadata());
+            long outputNs = System.nanoTime() - t0;
 
-        return new ProcessingResult(extraction.getHybridTimings(), extraction.getExtractionNs(), outputNs);
+            return new ProcessingResult(extraction.getHybridTimings(), extraction.getExtractionNs(), outputNs);
+        } finally {
+            // Always release resources, even if processing threw. closePdfResources
+            // logs and swallows per-step failures so cleanup cannot mask the original
+            // processing exception.
+            closePdfResources();
+        }
     }
 
     /**
@@ -226,7 +275,7 @@ public class DocumentProcessor {
             pageArtifacts[i] = document.getArtifacts(i);
         }
 
-        int parallelism = Runtime.getRuntime().availableProcessors();
+        int parallelism = config.getThreads();
         ForkJoinPool pool = new ForkJoinPool(parallelism);
         LOGGER.log(Level.INFO, "Processing {0} pages with {1} threads", new Object[]{totalPages, parallelism});
 
@@ -383,7 +432,20 @@ public class DocumentProcessor {
         return pagesToProcess == null || pagesToProcess.contains(pageNumber);
     }
 
-    private static void generateOutputs(String inputPdfName, List<List<IObject>> contents, Config config,
+    /**
+     * Writes the configured output files (JSON/MD/HTML/PDF/Text/images/tagged PDF)
+     * from already-extracted contents.
+     *
+     * <p><strong>Internal API. Do not call directly.</strong> This method is
+     * {@code public} only so the {@link org.opendataloader.pdf.api.OutputWriter}
+     * facade in the {@code api} package can delegate to it. The signature
+     * (notably the {@code List<List<IObject>>} and
+     * {@code Map<Long, ElementMetadata>} parameters) is an implementation
+     * detail and may change in any release. External callers must use
+     * {@link org.opendataloader.pdf.api.OutputWriter#writeOutputs}, which is
+     * the stable public API.
+     */
+    public static void generateOutputs(String inputPdfName, List<List<IObject>> contents, Config config,
                                            Map<Long, ElementMetadata> elementMetadata) throws IOException {
         // Stdout mode: write primary format to stdout, skip file I/O
         if (config.isOutputStdout()) {
@@ -651,9 +713,15 @@ public class DocumentProcessor {
 
         // xycut: XY-Cut++ sorting (per-page, stateless — safe to parallelize)
         if (Config.READING_ORDER_XYCUT.equals(readingOrder)) {
-            IntStream.range(0, StaticContainers.getDocument().getNumberOfPages()).parallel().forEach(pageNumber ->
-                contents.set(pageNumber, XYCutPlusPlusSorter.sort(contents.get(pageNumber)))
-            );
+            int totalPages = StaticContainers.getDocument().getNumberOfPages();
+            IntStream pages = IntStream.range(0, totalPages);
+            if (config.getThreads() > 1) {
+                pages.parallel().forEach(pageNumber ->
+                    contents.set(pageNumber, XYCutPlusPlusSorter.sort(contents.get(pageNumber))));
+            } else {
+                pages.forEach(pageNumber ->
+                    contents.set(pageNumber, XYCutPlusPlusSorter.sort(contents.get(pageNumber))));
+            }
             return;
         }
 
